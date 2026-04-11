@@ -8,10 +8,8 @@ import urllib.parse
 import json
 from typing import List
 
-# 批次大小：每次最多合并翻译的字幕条数
+# 每批最多传给 DeepL 的字幕条数（API 单次请求上限为 50 条）
 BATCH_SIZE = 50
-# 条目分隔符（不会出现在日语字幕中）
-SEP = "\n⚡\n"
 
 
 class DeepLTranslator:
@@ -24,17 +22,20 @@ class DeepLTranslator:
             self.base_url = "https://api.deepl.com/v2"
 
     def _request(self, texts: List[str]) -> List[str]:
-        """向 DeepL API 发送一批翻译请求"""
+        """
+        向 DeepL API 发送多条文本，利用原生多 text 参数支持。
+        一次请求返回与输入等长的译文列表，无需拼接分隔符。
+        """
         url = f"{self.base_url}/translate"
-        payload = {
-            "auth_key": self.api_key,
-            "text": texts,
-            "source_lang": "JA",
-            "target_lang": "ZH",
-        }
-        data = urllib.parse.urlencode(payload, doseq=True).encode('utf-8')
+
+        # DeepL 支持同一参数名重复传递多个值
+        params = [("source_lang", "JA"), ("target_lang", "ZH")]
+        params += [("text", t) for t in texts]
+
+        data = urllib.parse.urlencode(params).encode('utf-8')
         req = urllib.request.Request(url, data=data, method='POST')
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        req.add_header('Authorization', f'DeepL-Auth-Key {self.api_key}')
 
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode('utf-8'))
@@ -48,48 +49,35 @@ class DeepLTranslator:
     ) -> List[str]:
         """
         翻译字幕文本列表。
-        采用批次合并策略：每批 BATCH_SIZE 条合并为一个字符串发送。
+        每批直接传多个 text 参数给 DeepL，返回等长译文列表。
         progress_callback(done, total) 用于更新进度条。
         """
         results = []
         total = len(texts)
-        done = 0
 
         for i in range(0, total, BATCH_SIZE):
             batch = texts[i: i + BATCH_SIZE]
 
-            # 合并为一个字符串，用 SEP 分隔
-            merged = SEP.join(batch)
-
             retries = 0
-            while retries < 5:
+            while True:
                 try:
-                    translated_list = self._request([merged])
-                    translated_merged = translated_list[0]
+                    translated = self._request(batch)
+                    # 数量校验：异常时保留原文
+                    if len(translated) != len(batch):
+                        translated = batch
                     break
-                except Exception as e:
+                except Exception:
                     retries += 1
-                    wait = 2 ** retries
                     if retries >= 5:
-                        # 全部重试失败：保留原文
-                        translated_merged = merged
-                    else:
-                        time.sleep(wait)
+                        translated = batch   # 重试耗尽：保留原文
+                        break
+                    time.sleep(2 ** retries)
 
-            # 按分隔符拆回各条
-            parts = translated_merged.split(SEP)
-
-            # 如果分隔符被翻译改动，数量对不上时做降级处理
-            if len(parts) != len(batch):
-                parts = batch  # 降级：保留原文
-
-            results.extend(parts)
-            done += len(batch)
+            results.extend(translated)
 
             if progress_callback:
-                progress_callback(done, total)
+                progress_callback(len(results), total)
 
-            # 请求间隔，避免触发速率限制
             if i + BATCH_SIZE < total:
                 time.sleep(0.3)
 
@@ -98,8 +86,7 @@ class DeepLTranslator:
     def check_usage(self):
         """查询当月 API 用量"""
         url = f"{self.base_url}/usage"
-        payload = urllib.parse.urlencode({"auth_key": self.api_key}).encode()
-        req = urllib.request.Request(url, data=payload, method='POST')
-        req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        req = urllib.request.Request(url, method='GET')
+        req.add_header('Authorization', f'DeepL-Auth-Key {self.api_key}')
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
