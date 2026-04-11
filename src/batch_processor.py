@@ -10,41 +10,47 @@ from translator import DeepLTranslator
 
 
 def process_files(
-    files: List[Tuple[str, bytes]],          # [(文件名, 字节内容), ...]
-    translator: DeepLTranslator,
-    progress_callback: Callable = None,       # (文件名, 条数done, 条数total)
+    files: List[Tuple[str, bytes]],
+    translator,
+    progress_callback: Callable = None,
+    stop_event=None,                      # threading.Event，用于中断
 ) -> bytes:
     """
-    批量翻译所有 SRT 文件，返回 ZIP 压缩包的字节内容。
+    批量翻译所有 SRT 文件，返回 ZIP 压缩包字节。
+    stop_event 被设置时，当前文件翻译到一半会停止，
+    已完成的文件仍打入 ZIP。
     """
     zip_buffer = io.BytesIO()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for filename, file_bytes in files:
-            blocks: List[SRTBlock] = load_srt_file(file_bytes)
+            if stop_event and stop_event.is_set():
+                break
 
-            # 提取所有文本行（每个 block 可能多行，用 \n 拼合后翻译）
+            blocks: List[SRTBlock] = load_srt_file(file_bytes)
             original_texts = ['\n'.join(b.lines) for b in blocks]
 
             def _cb(done, total):
                 if progress_callback:
                     progress_callback(filename, done, total)
 
+            # 只有 OllamaTranslator 接受 stop_event 参数
+            import inspect
+            sig = inspect.signature(translator.translate_blocks)
+            kwargs = {"progress_callback": _cb}
+            if "stop_event" in sig.parameters:
+                kwargs["stop_event"] = stop_event
+
             translated_texts = translator.translate_blocks(
-                original_texts,
-                progress_callback=_cb
+                original_texts, **kwargs
             )
 
-            # 回填译文
             for block, translated in zip(blocks, translated_texts):
                 block.lines = translated.splitlines() or ['']
 
-            # 序列化并写入 ZIP
             out_bytes = save_srt_string(blocks)
-            # 输出文件名：原名加 _zh 后缀
             stem = filename.rsplit('.', 1)[0]
-            out_name = f"{stem}_zh.srt"
-            zf.writestr(out_name, out_bytes)
+            zf.writestr(f"{stem}_zh.srt", out_bytes)
 
     zip_buffer.seek(0)
     return zip_buffer.read()
