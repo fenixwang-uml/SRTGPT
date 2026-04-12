@@ -1,56 +1,61 @@
 """
-批量处理模块：协调 SRT 解析、翻译、写回和打包
+批量处理模块：协调 SRT 解析、翻译、写回和保存
 """
-import io
-import zipfile
-from typing import List, Tuple, Callable
+import inspect
+from pathlib import Path
+from typing import List, Tuple, Callable, Optional
 
 from srt_parser import load_srt_file, save_srt_string, SRTBlock
-from translator import DeepLTranslator
 
 
 def process_files(
     files: List[Tuple[str, bytes]],
     translator,
-    progress_callback: Callable = None,
-    stop_event=None,                      # threading.Event，用于中断
-) -> bytes:
+    progress_callback: Callable = None,  # (filename, done, total)
+    stop_event=None,                     # threading.Event，用于中断
+    output_dir: Optional[Path] = None,   # 每完成一个文件立即写入此目录
+) -> List[Tuple[str, bytes]]:
     """
-    批量翻译所有 SRT 文件，返回 ZIP 压缩包字节。
-    stop_event 被设置时，当前文件翻译到一半会停止，
-    已完成的文件仍打入 ZIP。
+    批量翻译所有 SRT 文件。
+    - 每完成一个文件立即写入 output_dir（如果提供）
+    - 返回 [(输出文件名, 字节内容), ...] 供调用方使用
+    - stop_event 被设置时停止，已完成的文件仍正常返回
     """
-    zip_buffer = io.BytesIO()
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for filename, file_bytes in files:
-            if stop_event and stop_event.is_set():
-                break
+    results = []
 
-            blocks: List[SRTBlock] = load_srt_file(file_bytes)
-            original_texts = ['\n'.join(b.lines) for b in blocks]
+    for filename, file_bytes in files:
+        if stop_event and stop_event.is_set():
+            break
 
-            def _cb(done, total):
-                if progress_callback:
-                    progress_callback(filename, done, total)
+        blocks: List[SRTBlock] = load_srt_file(file_bytes)
+        original_texts = ['\n'.join(b.lines) for b in blocks]
 
-            # 只有 OllamaTranslator 接受 stop_event 参数
-            import inspect
-            sig = inspect.signature(translator.translate_blocks)
-            kwargs = {"progress_callback": _cb}
-            if "stop_event" in sig.parameters:
-                kwargs["stop_event"] = stop_event
+        def _cb(done, total):
+            if progress_callback:
+                progress_callback(filename, done, total)
 
-            translated_texts = translator.translate_blocks(
-                original_texts, **kwargs
-            )
+        sig    = inspect.signature(translator.translate_blocks)
+        kwargs = {"progress_callback": _cb}
+        if "stop_event" in sig.parameters:
+            kwargs["stop_event"] = stop_event
 
-            for block, translated in zip(blocks, translated_texts):
-                block.lines = translated.splitlines() or ['']
+        translated_texts = translator.translate_blocks(original_texts, **kwargs)
 
-            out_bytes = save_srt_string(blocks)
-            stem = filename.rsplit('.', 1)[0]
-            zf.writestr(f"{stem}_zh.srt", out_bytes)
+        for block, translated in zip(blocks, translated_texts):
+            block.lines = translated.splitlines() or ['']
 
-    zip_buffer.seek(0)
-    return zip_buffer.read()
+        out_bytes = save_srt_string(blocks)
+        stem      = filename.rsplit('.', 1)[0]
+        out_name  = f"{stem}_zh.srt"
+
+        # 立即写入本地磁盘
+        if output_dir:
+            (output_dir / out_name).write_bytes(out_bytes)
+
+        results.append((out_name, out_bytes))
+
+    return results

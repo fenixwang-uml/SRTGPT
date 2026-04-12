@@ -33,10 +33,14 @@ with st.sidebar:
     if engine == "DeepL API":
         api_key = st.text_input(
             "DeepL API Key",
+            value=_cfg.get("deepl_api_key", ""),
             type="password",
             placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx",
-            help="Free 版 Key 末尾为 :fx",
+            help="Free 版 Key 末尾为 :fx，保存后 CLI 也可使用",
         )
+        if api_key and api_key != _cfg.get("deepl_api_key", ""):
+            _cfg["deepl_api_key"] = api_key
+            cfg_store.save(_cfg)
         if api_key and st.button("查询本月用量"):
             try:
                 usage = DeepLTranslator(api_key).check_usage()
@@ -82,11 +86,69 @@ uploaded = st.file_uploader(
 all_files = [(f.name, f.read()) for f in uploaded] if uploaded else []
 
 if all_files:
-    st.caption(f"共 **{len(all_files)}** 个文件：" +
+    st.caption(f"已上传 **{len(all_files)}** 个文件：" +
                "、".join(name for name, _ in all_files))
 
+    # ── 字幕优化 ─────────────────────────────────────────
+    from srt_parser import load_srt_file, save_srt_string
+    from dedup import deduplicate
+
+    enable_dedup = st.toggle("🔧 合并重复字幕（去重）", value=True)
+
+    if enable_dedup:
+        # 最大间隔滑块，单位秒，读取上次保存的值
+        default_gap_s = _cfg.get("dedup_max_gap_s", 300)
+        max_gap_s = st.slider(
+            "最大合并间隔（秒）",
+            min_value=0,
+            max_value=600,
+            value=default_gap_s,
+            step=10,
+            help="相邻两条相同字幕之间的时间差在此范围内则合并",
+        )
+        if max_gap_s != default_gap_s:
+            _cfg["dedup_max_gap_s"] = max_gap_s
+            cfg_store.save(_cfg)
+
+        max_gap_ms = max_gap_s * 1000
+
+        deduped_files  = []
+        dedup_rows     = []
+        total_removed  = 0
+
+        for fname, fbytes in all_files:
+            blocks          = load_srt_file(fbytes)
+            merged, removed = deduplicate(blocks, max_gap_ms=max_gap_ms)
+            total_removed  += removed
+            deduped_files.append((fname, save_srt_string(merged)))
+            dedup_rows.append({
+                "文件名":   fname,
+                "原始条数": len(blocks),
+                "优化后":   len(merged),
+                "合并条数": removed,
+            })
+
+        if total_removed > 0:
+            with st.expander(
+                f"📋 去重结果：共合并 {total_removed} 条重复字幕", expanded=True
+            ):
+                st.dataframe(
+                    dedup_rows,
+                    column_config={
+                        "文件名":   st.column_config.TextColumn(),
+                        "原始条数": st.column_config.NumberColumn(format="%d 条"),
+                        "优化后":   st.column_config.NumberColumn(format="%d 条"),
+                        "合并条数": st.column_config.NumberColumn(format="%d 条"),
+                    },
+                    hide_index=True,
+                    width='stretch',
+                )
+        else:
+            st.success("✅ 未发现重复字幕，无需合并")
+
+        all_files = deduped_files
+
     # ── 信息面板 ─────────────────────────────────────────
-    from srt_parser import load_srt_file
 
     file_rows    = []
     total_chars  = 0
@@ -174,6 +236,17 @@ if all_files:
                     except Exception as e:
                         st.error(f"测速失败：{e}")
 
+# ── 翻译输出路径 ─────────────────────────────────────────
+output_dir = st.text_input(
+    "翻译结果保存路径（可选）",
+    value=_cfg.get("translate_output_dir", ""),
+    placeholder=r"例如 D:\Subtitles\translated，留空则仅提供下载",
+    help="填写后翻译完成的 SRT 文件会同时保存到此目录",
+)
+if output_dir and output_dir != _cfg.get("translate_output_dir", ""):
+    _cfg["translate_output_dir"] = output_dir
+    cfg_store.save(_cfg)
+
 # ── 翻译按钮 ─────────────────────────────────────────────
 ready = (engine == "本地 Ollama" and ollama_model) or \
         (engine == "DeepL API" and api_key)
@@ -214,6 +287,7 @@ if st.button(
                 translator,
                 progress_callback=on_translate_progress,
                 stop_event=stop_event,
+                output_dir=Path(output_dir.strip()) if output_dir.strip() else None,
             )
         except Exception as e:
             error_box[0] = e
@@ -244,23 +318,35 @@ if st.button(
         status.error(f"❌ 翻译出错：{error_box[0]}")
         st.exception(error_box[0])
     elif stop_event.is_set():
+        files_done = progress_state["files_done"]
         status.warning(
-            f"⚠️ 已中断，完成 {progress_state['files_done']}/{total_files} 个文件，"
+            f"⚠️ 已中断，完成 {files_done}/{total_files} 个文件，"
             "未翻译条目已保留日文原文。"
-        )
-        result_box.download_button(
-            label="📦 下载已翻译部分",
-            data=zip_result[0],
-            file_name="translated_partial.zip",
-            mime="application/zip",
         )
     else:
         progress_bar.progress(1.0, text="翻译完成！")
-        status.success(f"✅ 全部 {total_files} 个文件翻译完成")
+        if output_dir.strip():
+            status.success(
+                f"✅ 全部 {total_files} 个文件翻译完成，已保存至 {output_dir.strip()}"
+            )
+        else:
+            status.success(f"✅ 全部 {total_files} 个文件翻译完成")
+
+    # 只要有结果就提供下载（含中断情况）
+    if zip_result[0]:
+        import io, zipfile
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for out_name, out_bytes in zip_result[0]:
+                zf.writestr(out_name, out_bytes)
+        zip_buffer.seek(0)
+
+        label = "📦 下载已翻译部分" if stop_event.is_set() else "📦 下载 ZIP 压缩包"
+        fname = "translated_partial.zip" if stop_event.is_set() else "translated_subtitles.zip"
         result_box.download_button(
-            label="📦 下载翻译后的 ZIP 压缩包",
-            data=zip_result[0],
-            file_name="translated_subtitles.zip",
+            label=label,
+            data=zip_buffer.read(),
+            file_name=fname,
             mime="application/zip",
-            type="primary",
+            type="primary" if not stop_event.is_set() else "secondary",
         )
