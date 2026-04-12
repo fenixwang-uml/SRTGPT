@@ -1,6 +1,6 @@
 """
 字幕去重模块
-合并相邻且内容相同的字幕条目（时间间隔在 30 秒以内视为连续）
+合并相邻且内容相同的字幕条目（时间间隔在 300 秒以内视为连续）
 """
 from typing import List, Tuple
 from srt_parser import SRTBlock
@@ -47,7 +47,7 @@ def deduplicate(
     max_gap_ms: int = MAX_GAP_MS,
 ) -> Tuple[List[SRTBlock], int]:
     """
-    合并相邻内容相同且时间连续（间隔 ≤ 30s）的字幕块。
+    合并相邻内容相同且时间连续（间隔 ≤ 300s）的字幕块。
     序号从原第一条的 index 开始连续重排。
 
     返回 (去重后的block列表, 合并掉的条数)

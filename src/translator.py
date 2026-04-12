@@ -104,22 +104,65 @@ class OllamaTranslator:
         "4. 语言自然流畅，符合中文字幕习惯"
     )
 
-    # 针对 4070 Ti 的推理参数
-    # 字幕场景特点：输入短（10-30字）、输出短、需要稳定不发挥
-    GPU_OPTIONS = {
-        "num_gpu":       99,     # 所有层全部加载到 GPU，不留给 CPU
-        "num_ctx":       512,    # 字幕极短，512 足够，省显存给 KV cache
-        "num_batch":     512,    # prompt 并行处理批大小，越大越快
-        "num_thread":    4,      # CPU 线程（仅处理非 GPU 部分，4 够用）
-        "temperature":   0.1,    # 低随机性，翻译稳定不乱发挥
-        "repeat_penalty": 1.1,   # 避免译文出现重复短语
-        "top_k":         20,     # 缩小采样范围，配合低温度加速
-        "top_p":         0.9,
+    # 模式 A：当前模式（保守，稳定）
+    PRESET_BALANCED = {
+        "num_gpu":        99,
+        "num_ctx":        512,
+        "num_batch":      512,
+        "num_thread":     4,
+        "temperature":    0.1,
+        "repeat_penalty": 1.1,
+        "top_k":          20,
+        "top_p":          0.9,
     }
 
-    def __init__(self, model: str = "qwen2.5:14b"):
-        self.model = model
-        self.url = "http://localhost:11434/api/chat"
+    # 模式 B：高吞吐模式（更大上下文 + 更大批次，GPU 利用率更高）
+    PRESET_THROUGHPUT = {
+        "num_gpu":        99,
+        "num_ctx":        2048,   # 给批量字幕 + 上下文更多空间
+        "num_batch":      1024,   # 更大 prompt 并行批次
+        "num_thread":     4,
+        "temperature":    0.1,
+        "repeat_penalty": 1.1,
+        "top_k":          20,
+        "top_p":          0.9,
+    }
+
+    PRESETS = {
+        "balanced":   PRESET_BALANCED,
+        "throughput": PRESET_THROUGHPUT,
+    }
+
+    # 模式 B 对应更大的翻译批次
+    BATCH_SIZE_BY_PRESET = {
+        "balanced":   8,
+        "throughput": 20,
+    }
+
+    def __init__(
+        self,
+        model: str = "qwen2.5:14b",
+        preset: str = "balanced",
+        custom_options: dict = None,
+        custom_batch: int = 8,
+    ):
+        self.model          = model
+        self.preset         = preset if preset in (*self.PRESETS, "custom") else "balanced"
+        self._custom_opts   = custom_options or {}
+        self._custom_batch  = custom_batch
+        self.url            = "http://localhost:11434/api/chat"
+
+    @property
+    def GPU_OPTIONS(self):
+        if self.preset == "custom":
+            return self._custom_opts
+        return self.PRESETS[self.preset]
+
+    @property
+    def BATCH_SIZE(self):
+        if self.preset == "custom":
+            return self._custom_batch
+        return self.BATCH_SIZE_BY_PRESET[self.preset]
 
     def _translate_one(self, text: str) -> str:
         payload = {
@@ -140,41 +183,33 @@ class OllamaTranslator:
 
         return result["message"]["content"].strip()
 
-    def benchmark(self, samples: List[str], n: int = 3) -> tuple:
+    def benchmark(self, samples: List[str], n: int = 10, progress_callback=None) -> tuple:
         """
-        用真实字幕测速，返回 (单条均时, 修正系数)。
-        第一轮：context 为空（冷启动）
-        第二轮：context 填满（稳定状态）
-        修正系数 = 第二轮均时 / 第一轮均时，反映上下文窗口的实际开销。
+        用真实翻译流程测速，直接调用 translate_blocks，
+        场景与实际翻译完全一致（相同批次大小、上下文积累、prompt 结构）。
+        返回 (单条均时, 修正系数=1.0)。
+        修正系数固定为 1.0，因为测速本身已包含上下文预热，无需额外修正。
         """
         test_texts = [t for t in samples if t.strip()][:n]
         if not test_texts:
             return 3.0, 1.0
 
-        # 第一轮：无上下文
-        start = time.time()
-        try:
-            self._translate_batch(test_texts, context=[])
-        except Exception:
-            pass
-        secs_cold = (time.time() - start) / len(test_texts)
+        total = len(test_texts)
+        done  = [0]
 
-        # 第二轮：填满上下文窗口
-        full_context = [(t, t) for t in test_texts * 2][-self.CONTEXT_SIZE:]
-        start = time.time()
-        try:
-            self._translate_batch(test_texts, context=full_context)
-        except Exception:
-            pass
-        secs_warm = (time.time() - start) / len(test_texts)
+        def _cb(d, t):
+            done[0] = d
+            if progress_callback:
+                progress_callback(d, t, "模拟翻译中")
 
-        # 修正系数：至少为 1.0，避免第二轮因缓存反而更快导致系数 < 1
-        factor = max(secs_warm / secs_cold, 1.0) if secs_cold > 0 else 1.0
+        import time as _time
+        start = _time.time()
+        self.translate_blocks(test_texts, progress_callback=_cb)
+        elapsed = _time.time() - start
 
-        return secs_cold, factor
+        secs_per_item = elapsed / total
+        return secs_per_item, 1.0
 
-    # 每批打包翻译的字幕条数
-    BATCH_SIZE = 8
     # 滑动窗口：带入前几条已译结果作为上下文
     CONTEXT_SIZE = 5
 

@@ -51,7 +51,10 @@ with st.sidebar:
                 st.progress(pct / 100, text=f"{pct:.1f}%  /  上限 {limit:,}")
             except Exception as e:
                 st.error(f"查询失败：{e}")
-        ollama_model = None
+        ollama_model   = None
+        ollama_preset  = "balanced"
+        custom_options = {}
+        custom_batch   = 8
 
     else:
         api_key = None
@@ -74,6 +77,88 @@ with st.sidebar:
         else:
             st.error("❌ 无法连接 Ollama，请确认服务已启动")
             ollama_model = st.text_input("手动输入模型名", value="qwen2.5:14b")
+
+        ollama_preset = st.radio(
+            "推理模式",
+            ["balanced", "throughput", "custom"],
+            format_func=lambda x: {
+                "balanced":   "⚖️ 均衡模式（ctx 512，批次 8）",
+                "throughput": "🚀 高吞吐模式（ctx 2048，批次 20）",
+                "custom":     "🔧 自定义模式",
+            }[x],
+            help="高吞吐模式适合 GPU 利用率偏低时，batch 更大让 GPU 持续工作",
+        )
+
+        # 自定义参数输入
+        custom_options = {}
+        custom_batch   = 8
+        if ollama_preset == "custom":
+            st.warning(
+                "⚠️ 自定义模式仅供高级用户调试使用。"
+                "参数设置不当可能导致翻译质量下降、显存溢出或程序崩溃。"
+                "如无把握请使用预设模式。",
+                icon="⚠️",
+            )
+            with st.expander("展开参数设置", expanded=True):
+                balanced = OllamaTranslator.PRESET_BALANCED
+                c1, c2 = st.columns(2)
+                with c1:
+                    custom_options["num_ctx"] = st.number_input(
+                        "num_ctx（上下文长度）",
+                        min_value=128, max_value=8192,
+                        value=balanced["num_ctx"], step=128,
+                        help="模型单次能处理的最大 token 数。过小会截断字幕，过大占用更多显存。",
+                    )
+                    custom_options["num_batch"] = st.number_input(
+                        "num_batch（prompt 批处理大小）",
+                        min_value=64, max_value=2048,
+                        value=balanced["num_batch"], step=64,
+                        help="prompt 阶段并行处理的 token 数。越大 GPU 利用率越高，但显存消耗也增加。",
+                    )
+                    custom_options["num_gpu"] = st.number_input(
+                        "num_gpu（GPU 层数）",
+                        min_value=0, max_value=99,
+                        value=balanced["num_gpu"], step=1,
+                        help="加载到 GPU 的模型层数。99 表示全部，设为 0 则完全用 CPU 推理。",
+                    )
+                    custom_options["num_thread"] = st.number_input(
+                        "num_thread（CPU 线程数）",
+                        min_value=1, max_value=32,
+                        value=balanced["num_thread"], step=1,
+                        help="处理非 GPU 部分使用的 CPU 线程数。一般无需调整。",
+                    )
+                with c2:
+                    custom_options["temperature"] = st.slider(
+                        "temperature（随机性）",
+                        min_value=0.0, max_value=1.0,
+                        value=float(balanced["temperature"]), step=0.05,
+                        help="越低输出越确定，翻译场景建议保持 0.1 以下。",
+                    )
+                    custom_options["repeat_penalty"] = st.slider(
+                        "repeat_penalty（重复惩罚）",
+                        min_value=1.0, max_value=2.0,
+                        value=float(balanced["repeat_penalty"]), step=0.05,
+                        help="抑制输出中的重复词语。过高可能导致译文不自然。",
+                    )
+                    custom_options["top_k"] = st.number_input(
+                        "top_k（采样范围）",
+                        min_value=1, max_value=100,
+                        value=balanced["top_k"], step=1,
+                        help="采样时考虑的候选词数量。配合低 temperature 使用，一般无需调整。",
+                    )
+                    custom_options["top_p"] = st.slider(
+                        "top_p（核采样概率）",
+                        min_value=0.1, max_value=1.0,
+                        value=float(balanced["top_p"]), step=0.05,
+                        help="累计概率阈值，超过后截断候选词。一般无需调整。",
+                    )
+
+                custom_batch = st.number_input(
+                    "翻译批次大小（条/请求）",
+                    min_value=1, max_value=50,
+                    value=8, step=1,
+                    help="每次发给 Ollama 的字幕条数。过大可能超出 num_ctx 导致截断。",
+                )
 
 
 # ── 文件上传 ─────────────────────────────────────────────
@@ -216,25 +301,49 @@ if all_files:
 
         else:
             col_b.metric("费用", "免费 ✅")
+
+            bench_n = st.select_slider(
+                "测速采样条数",
+                options=[3, 5, 10, 20, 50],
+                value=10,
+                help="采样越多结果越准确，但测速本身耗时更长",
+            )
+
             if st.button("⏱️ 测速并预估用时", type="secondary"):
-                with st.spinner("正在用 3 条字幕测速，请稍候…"):
-                    try:
-                        secs_per_item, factor = OllamaTranslator(
-                            model=ollama_model
-                        ).benchmark(sample_texts, n=3)
-                        total_secs = secs_per_item * total_blocks * factor
-                        h = int(total_secs // 3600)
-                        m = int((total_secs % 3600) // 60)
-                        s = int(total_secs % 60)
-                        time_str = (f"{h}h {m}m {s}s" if h
-                                    else f"{m}m {s}s" if m
-                                    else f"{s}s")
-                        c1, c2 = st.columns(2)
-                        c1.metric("单条平均耗时", f"{secs_per_item:.1f} 秒")
-                        c2.metric("预计总用时", f"≈ {time_str}",
-                                  help=f"上下文开销修正系数：×{factor:.2f}（实测）")
-                    except Exception as e:
-                        st.error(f"测速失败：{e}")
+                bench_status = st.empty()
+                bench_bar    = st.progress(0)
+                bench_status.info(f"正在用 {bench_n} 条字幕模拟真实翻译流程…")
+
+                def on_bench_progress(done, total, phase):
+                    bench_bar.progress(
+                        done / total,
+                        text=f"{phase}：{done}/{total} 条",
+                    )
+
+                try:
+                    secs_per_item, factor = OllamaTranslator(
+                        model=ollama_model, preset=ollama_preset,
+                        custom_options=custom_options, custom_batch=custom_batch,
+                    ).benchmark(sample_texts, n=bench_n,
+                                progress_callback=on_bench_progress)
+
+                    bench_bar.empty()
+                    bench_status.empty()
+
+                    total_secs = secs_per_item * total_blocks * factor
+                    h = int(total_secs // 3600)
+                    m = int((total_secs % 3600) // 60)
+                    s = int(total_secs % 60)
+                    time_str = (f"{h}h {m}m {s}s" if h
+                                else f"{m}m {s}s" if m
+                                else f"{s}s")
+                    c1, c2 = st.columns(2)
+                    c1.metric("单条平均耗时", f"{secs_per_item:.1f} 秒")
+                    c2.metric("预计总用时", f"≈ {time_str}",
+                              help="基于真实翻译流程实测，与实际用时高度一致")
+                except Exception as e:
+                    bench_bar.empty()
+                    bench_status.error(f"测速失败：{e}")
 
 # ── 翻译输出路径 ─────────────────────────────────────────
 output_dir = st.text_input(
@@ -259,26 +368,41 @@ if st.button(
     if engine == "DeepL API":
         translator = DeepLTranslator(api_key)
     else:
-        translator = OllamaTranslator(model=ollama_model)
+        translator = OllamaTranslator(
+            model=ollama_model, preset=ollama_preset,
+            custom_options=custom_options, custom_batch=custom_batch,
+        )
 
     import threading
-    status       = st.empty()
-    progress_bar = st.progress(0)
-    stop_btn     = st.empty()
-    result_box   = st.empty()
+    status        = st.empty()
+    bar_blocks    = st.progress(0)   # 总字幕条数进度
+    bar_files     = st.progress(0)   # 文件数进度
+    stop_btn      = st.empty()
+    result_box    = st.empty()
 
-    total_files    = len(all_files)
+    total_files  = len(all_files)
+    total_blocks_all = sum(
+        len(load_srt_file(fbytes)) for _, fbytes in all_files
+    )
     stop_event     = threading.Event()
     zip_result     = [None]
     error_box      = [None]
-    progress_state = {"filename": "", "done": 0, "total": 1, "files_done": 0}
+    progress_state = {
+        "filename":     "",
+        "blocks_done":  0,   # 当前文件已翻译条数
+        "blocks_total": 1,   # 当前文件总条数
+        "files_done":   0,
+        "global_done":  0,   # 跨所有文件累计已翻译条数
+    }
 
     def on_translate_progress(filename, done, total):
-        progress_state["filename"] = filename
-        progress_state["done"]     = done
-        progress_state["total"]    = total
+        progress_state["filename"]     = filename
+        progress_state["blocks_done"]  = done
+        progress_state["blocks_total"] = total
+        # 当前文件翻译完才计入全局累计
         if done == total:
-            progress_state["files_done"] += 1
+            progress_state["files_done"]  += 1
+            progress_state["global_done"] += total
 
     def run_translation():
         try:
@@ -296,15 +420,37 @@ if st.button(
     thread = threading.Thread(target=run_translation, daemon=True)
     thread.start()
 
+    # 翻译期间注入 beforeunload 警告，防止误关浏览器
+    st.markdown("""
+        <script>
+        window._srtgpt_warn = function(e) {
+            e.preventDefault();
+            e.returnValue = '翻译正在进行中，确认要离开吗？';
+        };
+        window.addEventListener('beforeunload', window._srtgpt_warn);
+        </script>
+    """, unsafe_allow_html=True)
+
     btn_counter = [0]
     while thread.is_alive():
-        s   = progress_state
-        pct = s["files_done"] / total_files if total_files else 0
-        progress_bar.progress(
-            min(pct, 1.0),
-            text=f"正在翻译：{s['filename']}（{s['done']}/{s['total']} 条）"
-                 if s["filename"] else "准备中…",
+        s = progress_state
+
+        # 字幕条数进度：已完成文件的条数 + 当前文件已翻译条数
+        global_done = s["global_done"] + s["blocks_done"]
+        blocks_pct  = global_done / total_blocks_all if total_blocks_all else 0
+        bar_blocks.progress(
+            min(blocks_pct, 1.0),
+            text=f"字幕进度：{global_done:,} / {total_blocks_all:,} 条"
+                 + (f"（{s['filename']}）" if s["filename"] else ""),
         )
+
+        # 文件数进度
+        files_pct = s["files_done"] / total_files if total_files else 0
+        bar_files.progress(
+            min(files_pct, 1.0),
+            text=f"文件进度：{s['files_done']} / {total_files} 个文件",
+        )
+
         if engine == "本地 Ollama":
             btn_counter[0] += 1
             if stop_btn.button("⏹️ 中断翻译", key=f"stop_btn_{btn_counter[0]}"):
@@ -312,7 +458,18 @@ if st.button(
                 status.warning("正在中断，等待当前条目完成…")
         time.sleep(0.5)
 
+    # 完成后两条进度条都满
+    bar_blocks.progress(1.0, text=f"字幕进度：{total_blocks_all:,} / {total_blocks_all:,} 条")
+    bar_files.progress(1.0, text=f"文件进度：{total_files} / {total_files} 个文件")
+
     stop_btn.empty()
+
+    # 翻译结束，移除关闭警告
+    st.markdown("""
+        <script>
+        window.removeEventListener('beforeunload', window._srtgpt_warn);
+        </script>
+    """, unsafe_allow_html=True)
 
     if error_box[0]:
         status.error(f"❌ 翻译出错：{error_box[0]}")
