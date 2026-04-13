@@ -18,6 +18,19 @@ st.set_page_config(
     layout="centered",
 )
 
+# ── beforeunload 警告（页面顶部一次性注入）────────────────
+# 用 session_state 标志控制是否激活，每次 rerun 重新渲染
+if "translating" not in st.session_state:
+    st.session_state.translating = False
+
+_warn_js = "window.__srtgpt_warn=function(e){e.preventDefault();e.returnValue='';};window.addEventListener('beforeunload',window.__srtgpt_warn);"
+_remove_js = "window.removeEventListener('beforeunload',window.__srtgpt_warn);"
+_js = _warn_js if st.session_state.translating else _remove_js
+st.markdown(
+    f'<img src="x" onerror="{_js}" style="display:none">',
+    unsafe_allow_html=True,
+)
+
 st.title("🎌 日文字幕翻译工具")
 
 # ── 侧边栏 ───────────────────────────────────────────────
@@ -169,6 +182,31 @@ uploaded = st.file_uploader(
 )
 
 all_files = [(f.name, f.read()) for f in uploaded] if uploaded else []
+
+if all_files:
+    # ── 重复文件检查 ─────────────────────────────────────
+    out_dir_check = _cfg.get("translate_output_dir", "").strip()
+    if out_dir_check:
+        out_dir_path = Path(out_dir_check)
+        skipped = []
+        kept    = []
+        for fname, fbytes in all_files:
+            stem     = fname.rsplit(".", 1)[0]
+            out_name = f"{stem}_zh.srt"
+            if (out_dir_path / out_name).exists():
+                skipped.append(fname)
+            else:
+                kept.append((fname, fbytes))
+
+        if skipped:
+            st.warning(
+                f"以下 {len(skipped)} 个文件在输出目录已存在译文，已自动跳过：\n"
+                + "、".join(skipped)
+            )
+        all_files = kept
+
+    if not all_files:
+        st.info("所有上传文件均已翻译，无需重复处理。")
 
 if all_files:
     st.caption(f"已上传 **{len(all_files)}** 个文件：" +
@@ -380,6 +418,24 @@ if st.button(
     stop_btn      = st.empty()
     result_box    = st.empty()
 
+    # 模型原始输出日志（仅 Ollama）
+    if engine == "本地 Ollama":
+        log_expander  = st.expander("🔍 模型原始输出（按批）", expanded=False)
+        log_container = log_expander.empty()
+        log_entries   = []      # 主线程读取
+        log_queue     = []      # 子线程写入
+        log_counter   = [0]
+
+        def on_log(raw: str):
+            log_counter[0] += 1
+            log_queue.append((log_counter[0], raw))   # 只写共享列表
+        log_cb = on_log
+    else:
+        log_cb        = None
+        log_queue     = []
+        log_entries   = []
+        log_container = None
+
     total_files  = len(all_files)
     total_blocks_all = sum(
         len(load_srt_file(fbytes)) for _, fbytes in all_files
@@ -412,6 +468,7 @@ if st.button(
                 progress_callback=on_translate_progress,
                 stop_event=stop_event,
                 output_dir=Path(output_dir.strip()) if output_dir.strip() else None,
+                log_callback=log_cb,
             )
         except Exception as e:
             error_box[0] = e
@@ -420,16 +477,8 @@ if st.button(
     thread = threading.Thread(target=run_translation, daemon=True)
     thread.start()
 
-    # 翻译期间注入 beforeunload 警告，防止误关浏览器
-    st.markdown("""
-        <script>
-        window._srtgpt_warn = function(e) {
-            e.preventDefault();
-            e.returnValue = '翻译正在进行中，确认要离开吗？';
-        };
-        window.addEventListener('beforeunload', window._srtgpt_warn);
-        </script>
-    """, unsafe_allow_html=True)
+    # beforeunload 通过页面顶部的 st.markdown 块控制（onerror 触发 JS）
+    st.session_state.translating = True
 
     btn_counter = [0]
     while thread.is_alive():
@@ -456,6 +505,16 @@ if st.button(
             if stop_btn.button("⏹️ 中断翻译", key=f"stop_btn_{btn_counter[0]}"):
                 stop_event.set()
                 status.warning("正在中断，等待当前条目完成…")
+
+            # 主线程读取日志队列并渲染
+            if log_queue:
+                log_entries.extend(log_queue)
+                log_queue.clear()
+                n, text = log_entries[-1]
+                log_container.code(
+                    f"─── 批次 {n} ───\n{text}",
+                    language=None,
+                )
         time.sleep(0.5)
 
     # 完成后两条进度条都满
@@ -463,13 +522,7 @@ if st.button(
     bar_files.progress(1.0, text=f"文件进度：{total_files} / {total_files} 个文件")
 
     stop_btn.empty()
-
-    # 翻译结束，移除关闭警告
-    st.markdown("""
-        <script>
-        window.removeEventListener('beforeunload', window._srtgpt_warn);
-        </script>
-    """, unsafe_allow_html=True)
+    st.session_state.translating = False
 
     if error_box[0]:
         status.error(f"❌ 翻译出错：{error_box[0]}")
@@ -481,7 +534,8 @@ if st.button(
             "未翻译条目已保留日文原文。"
         )
     else:
-        progress_bar.progress(1.0, text="翻译完成！")
+        bar_blocks.progress(1.0, text=f"字幕进度：{total_blocks_all:,} / {total_blocks_all:,} 条")
+        bar_files.progress(1.0, text=f"文件进度：{total_files} / {total_files} 个文件")
         if output_dir.strip():
             status.success(
                 f"✅ 全部 {total_files} 个文件翻译完成，已保存至 {output_dir.strip()}"

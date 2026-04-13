@@ -14,6 +14,7 @@ def process_files(
     progress_callback: Callable = None,  # (filename, done, total)
     stop_event=None,                     # threading.Event，用于中断
     output_dir: Optional[Path] = None,   # 每完成一个文件立即写入此目录
+    log_callback=None,                   # (raw: str) 每批原始输出回调
 ) -> List[Tuple[str, bytes]]:
     """
     批量翻译所有 SRT 文件。
@@ -42,6 +43,8 @@ def process_files(
         kwargs = {"progress_callback": _cb}
         if "stop_event" in sig.parameters:
             kwargs["stop_event"] = stop_event
+        if "log_callback" in sig.parameters:
+            kwargs["log_callback"] = log_callback
 
         translated_texts = translator.translate_blocks(original_texts, **kwargs)
 

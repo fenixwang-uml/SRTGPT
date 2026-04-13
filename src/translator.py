@@ -213,7 +213,7 @@ class OllamaTranslator:
     # 滑动窗口：带入前几条已译结果作为上下文
     CONTEXT_SIZE = 5
 
-    def _translate_batch(self, texts: List[str], context: List[tuple]) -> List[str]:
+    def _translate_batch(self, texts: List[str], context: List[tuple], log_callback=None) -> List[str]:
         """
         批量翻译一组字幕，同时携带滑动窗口上下文。
         context: [(原文, 译文), ...] 前几条已完成的对照，供模型参考。
@@ -259,6 +259,8 @@ class OllamaTranslator:
             result = json.loads(resp.read().decode('utf-8'))
 
         raw = result["message"]["content"].strip()
+        if log_callback:
+            log_callback(raw)
         return self._parse_batch(raw, texts)
 
     def _parse_batch(self, raw: str, originals: List[str]) -> List[str]:
@@ -301,6 +303,7 @@ class OllamaTranslator:
         texts: List[str],
         progress_callback=None,
         stop_event=None,
+        log_callback=None,
     ) -> List[str]:
         """
         批量翻译 + 滑动上下文窗口。
@@ -321,7 +324,7 @@ class OllamaTranslator:
             retries = 0
             while True:
                 try:
-                    translated_batch = self._translate_batch(batch, context)
+                    translated_batch = self._translate_batch(batch, context, log_callback=log_callback)
                     break
                 except Exception:
                     retries += 1
