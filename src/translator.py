@@ -13,9 +13,10 @@ BATCH_SIZE = 50
 
 
 class DeepLTranslator:
-    def __init__(self, api_key: str):
-        self.api_key = api_key.strip()
-        # Free 版和 Pro 版使用不同的域名
+    def __init__(self, api_key: str, source_lang: str = "JA", target_lang: str = "ZH"):
+        self.api_key     = api_key.strip()
+        self.source_lang = source_lang
+        self.target_lang = target_lang
         if self.api_key.endswith(':fx'):
             self.base_url = "https://api-free.deepl.com/v2"
         else:
@@ -28,8 +29,7 @@ class DeepLTranslator:
         """
         url = f"{self.base_url}/translate"
 
-        # DeepL 支持同一参数名重复传递多个值
-        params = [("source_lang", "JA"), ("target_lang", "ZH")]
+        params = [("source_lang", self.source_lang), ("target_lang", self.target_lang)]
         params += [("text", t) for t in texts]
 
         data = urllib.parse.urlencode(params).encode('utf-8')
@@ -95,15 +95,6 @@ class DeepLTranslator:
 class OllamaTranslator:
     """本地 Ollama 翻译后端，针对 4070 Ti (12GB) 优化"""
 
-    SYSTEM_PROMPT = (
-        "你是一名专业的影视字幕翻译，负责将日文字幕翻译为简体中文。"
-        "要求：\n"
-        "1. 只输出译文，不添加任何解释、注释或多余标点\n"
-        "2. 保持原文的换行格式\n"
-        "3. 人名、地名等专有名词音译或保留原文\n"
-        "4. 语言自然流畅，符合中文字幕习惯"
-    )
-
     # 模式 A：当前模式（保守，稳定）
     PRESET_BALANCED = {
         "num_gpu":        99,
@@ -119,8 +110,8 @@ class OllamaTranslator:
     # 模式 B：高吞吐模式（更大上下文 + 更大批次，GPU 利用率更高）
     PRESET_THROUGHPUT = {
         "num_gpu":        99,
-        "num_ctx":        2048,   # 给批量字幕 + 上下文更多空间
-        "num_batch":      1024,   # 更大 prompt 并行批次
+        "num_ctx":        2048,
+        "num_batch":      1024,
         "num_thread":     4,
         "temperature":    0.1,
         "repeat_penalty": 1.1,
@@ -133,7 +124,6 @@ class OllamaTranslator:
         "throughput": PRESET_THROUGHPUT,
     }
 
-    # 模式 B 对应更大的翻译批次
     BATCH_SIZE_BY_PRESET = {
         "balanced":   8,
         "throughput": 20,
@@ -145,12 +135,27 @@ class OllamaTranslator:
         preset: str = "balanced",
         custom_options: dict = None,
         custom_batch: int = 8,
+        source_lang: str = "日语",
+        target_lang: str = "简体中文",
     ):
         self.model          = model
         self.preset         = preset if preset in (*self.PRESETS, "custom") else "balanced"
         self._custom_opts   = custom_options or {}
         self._custom_batch  = custom_batch
+        self.source_lang    = source_lang
+        self.target_lang    = target_lang
         self.url            = "http://localhost:11434/api/chat"
+
+    @property
+    def SYSTEM_PROMPT(self):
+        return (
+            f"你是一名专业的影视字幕翻译，负责将{self.source_lang}字幕翻译为{self.target_lang}。"
+            f"要求：\n"
+            f"1. 只输出译文，不添加任何解释、注释或多余标点\n"
+            f"2. 保持原文的换行格式\n"
+            f"3. 人名、地名等专有名词音译或保留原文\n"
+            f"4. 语言自然流畅，符合{self.target_lang}字幕习惯"
+        )
 
     @property
     def GPU_OPTIONS(self):

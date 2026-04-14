@@ -11,17 +11,20 @@ from srt_parser import load_srt_file, save_srt_string, SRTBlock
 def process_files(
     files: List[Tuple[str, bytes]],
     translator,
-    progress_callback: Callable = None,  # (filename, done, total)
-    stop_event=None,                     # threading.Event，用于中断
-    output_dir: Optional[Path] = None,   # 每完成一个文件立即写入此目录
-    log_callback=None,                   # (raw: str) 每批原始输出回调
+    progress_callback: Callable = None,
+    stop_event=None,
+    output_dir: Optional[Path] = None,
+    log_callback=None,
+    blacklist: List[str] = None,
 ) -> List[Tuple[str, bytes]]:
     """
     批量翻译所有 SRT 文件。
+    - 翻译后自动应用黑名单通配符过滤
     - 每完成一个文件立即写入 output_dir（如果提供）
-    - 返回 [(输出文件名, 字节内容), ...] 供调用方使用
-    - stop_event 被设置时停止，已完成的文件仍正常返回
+    - 返回 [(输出文件名, 字节内容), ...]
     """
+    from blacklist import apply_blacklist
+
     if output_dir:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -51,11 +54,14 @@ def process_files(
         for block, translated in zip(blocks, translated_texts):
             block.lines = translated.splitlines() or ['']
 
+        # 应用黑名单通配符过滤
+        if blacklist:
+            blocks, _ = apply_blacklist(blocks, blacklist)
+
         out_bytes = save_srt_string(blocks)
         stem      = filename.rsplit('.', 1)[0]
         out_name  = f"{stem}_zh.srt"
 
-        # 立即写入本地磁盘
         if output_dir:
             (output_dir / out_name).write_bytes(out_bytes)
 
