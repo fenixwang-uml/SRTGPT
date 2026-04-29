@@ -16,6 +16,7 @@ def process_files(
     output_dir: Optional[Path] = None,
     log_callback=None,
     blacklist: List[str] = None,
+    scene_callback=None,          # (scene_text: str) 每批 <scene> 更新时调用
 ) -> List[Tuple[str, bytes]]:
     """
     批量翻译所有 SRT 文件。
@@ -48,6 +49,8 @@ def process_files(
             kwargs["stop_event"] = stop_event
         if "log_callback" in sig.parameters:
             kwargs["log_callback"] = log_callback
+        if "scene_callback" in sig.parameters:
+            kwargs["scene_callback"] = scene_callback
 
         translated_texts = translator.translate_blocks(original_texts, **kwargs)
 

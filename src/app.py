@@ -4,6 +4,7 @@ SRTGPT — 字幕翻译工具
 """
 import io
 import time
+import datetime
 import zipfile
 import threading
 from pathlib import Path
@@ -166,7 +167,20 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════
 # 主界面 Tabs
 # ════════════════════════════════════════════════════════
-_tab1, _tab3 = st.tabs(["🌐 翻译", "🚫 黑名单批处理"])
+_tab1, _tab2, _tab3 = st.tabs(["🌐 翻译", "🎬 高级模式", "🚫 黑名单批处理"])
+
+
+def _fmt_duration(secs: float) -> str:
+    """将秒数格式化为可读字符串"""
+    secs = int(secs)
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    if h:
+        return f"{h}h {m}m {s}s"
+    elif m:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 # ════════════════════════════════════════════════════════
@@ -353,6 +367,12 @@ with _tab1:
         progress_state   = {"filename": "", "blocks_done": 0, "blocks_total": 1,
                             "files_done": 0, "global_done": 0}
 
+        # ETA 追踪：记录每批完成的时间戳和完成条数
+        eta_state = {
+            "batch_times": [],      # [(完成时间戳, 累计完成条数), ...]
+            "last_global_done": 0,  # 上次轮询时的完成条数，用于检测批次完成
+        }
+
         def on_progress(filename, done, total):
             progress_state.update({"filename": filename, "blocks_done": done, "blocks_total": total})
             if done == total:
@@ -373,9 +393,12 @@ with _tab1:
                 error_box[0] = e
 
         status.info("翻译进行中，请稍候…")
+        eta_box = st.empty()          # ETA 显示区
         thread = threading.Thread(target=run_translation, daemon=True)
         thread.start()
         st.session_state.translating = True
+
+        translation_start = time.time()
 
         btn_counter = [0]
         while thread.is_alive():
@@ -390,6 +413,35 @@ with _tab1:
                 min(s["files_done"] / total_files, 1.0) if total_files else 0,
                 text=f"文件进度：{s['files_done']} / {total_files} 个文件",
             )
+
+            # ── ETA 计算（每批完成时更新）──────────────────────
+            now = time.time()
+            # 检测是否有新批次完成（global_done 增加说明有整文件完成，
+            # blocks_done 变化说明当前文件有新批次完成）
+            if global_done > eta_state["last_global_done"] and global_done > 0:
+                eta_state["batch_times"].append((now, global_done))
+                eta_state["last_global_done"] = global_done
+
+                # 用所有记录点计算平均速度（条/秒）
+                if len(eta_state["batch_times"]) >= 2:
+                    # 取最近 10 个数据点做滑动均值，让估算更跟得上实际速度
+                    recent = eta_state["batch_times"][-10:]
+                    t0, d0 = recent[0]
+                    t1, d1 = recent[-1]
+                    elapsed_recent = t1 - t0
+                    done_recent    = d1 - d0
+                    if elapsed_recent > 0 and done_recent > 0:
+                        speed = done_recent / elapsed_recent          # 条/秒
+                        remaining_blocks = total_blocks_cnt - global_done
+                        eta_secs  = remaining_blocks / speed
+                        total_elapsed = now - translation_start
+                        finish_at = datetime.datetime.now() + datetime.timedelta(seconds=eta_secs)
+                        eta_box.info(
+                            f"⏱ 已用时 **{_fmt_duration(total_elapsed)}**　｜　"
+                            f"剩余约 **{_fmt_duration(eta_secs)}**　｜　"
+                            f"预计完成 **{finish_at.strftime('%H:%M:%S')}**"
+                        )
+
             if engine == "本地 Ollama":
                 btn_counter[0] += 1
                 if stop_btn.button("⏹️ 中断翻译", key=f"stop_{btn_counter[0]}"):
@@ -405,6 +457,7 @@ with _tab1:
         bar_blocks.progress(1.0, text=f"字幕进度：{total_blocks_cnt:,} / {total_blocks_cnt:,} 条")
         bar_files.progress(1.0, text=f"文件进度：{total_files} / {total_files} 个文件")
         stop_btn.empty()
+        eta_box.empty()
         st.session_state.translating = False
 
         if error_box[0]:
@@ -429,6 +482,289 @@ with _tab1:
             result_box.download_button(label=label, data=zip_buf.read(),
                                        file_name=fname, mime="application/zip",
                                        type="secondary" if stop_event.is_set() else "primary")
+
+
+# ════════════════════════════════════════════════════════
+# Tab 2 — 高级翻译模式（外置 Prompt + Tone 选择 + 场景上下文）
+# ════════════════════════════════════════════════════════
+with _tab2:
+    st.subheader("🎬 高级翻译模式")
+    st.caption("使用外置 System Prompt，支持 Standard / Pornify 等风格，并显示跨批次场景上下文")
+
+    if engine != "本地 Ollama":
+        st.warning("⚠️ 高级模式目前仅支持本地 Ollama 引擎，请在左侧侧边栏切换。")
+    else:
+        from prompt_manager import load_prompt, list_available_tones
+
+        # ── Tone 选择 ───────────────────────────────────
+        available_tones = list_available_tones()
+        tone_labels = {t: {"standard": "📝 Standard（标准字幕）", "pornify": "🔞 Pornify（成人内容）"}.get(t, f"🔧 {t}") for t in available_tones}
+
+        saved_tone = _cfg.get("adv_tone", "standard")
+        default_tone_idx = available_tones.index(saved_tone) if saved_tone in available_tones else 0
+
+        selected_tone = st.selectbox(
+            "翻译风格（Tone）",
+            available_tones,
+            index=default_tone_idx,
+            format_func=lambda t: tone_labels.get(t, t),
+        )
+        if selected_tone != _cfg.get("adv_tone"):
+            _cfg["adv_tone"] = selected_tone
+            cfg_store.save(_cfg)
+
+        # 自定义 prompt 文件路径
+        custom_prompt_path = st.text_input(
+            "自定义 Prompt 文件路径（可选）",
+            value=_cfg.get("custom_prompt_path", ""),
+            placeholder=r"例如 D:\prompts\my_style.txt，留空使用内置",
+            key="adv_custom_prompt",
+        )
+        if custom_prompt_path and custom_prompt_path != _cfg.get("custom_prompt_path", ""):
+            _cfg["custom_prompt_path"] = custom_prompt_path
+            cfg_store.save(_cfg)
+
+        # 预览当前 Prompt
+        preview_prompt = load_prompt(
+            tone=selected_tone,
+            source_lang=source_lang_name,
+            target_lang=target_lang_name,
+            custom_path=custom_prompt_path or None,
+        )
+        with st.expander("👁 预览 System Prompt", expanded=False):
+            st.text_area(
+                "当前生效的 System Prompt（只读）",
+                value=preview_prompt.instructions,
+                height=200,
+                disabled=True,
+                key="adv_prompt_preview",
+            )
+
+        st.divider()
+
+        # ── 文件上传 ────────────────────────────────────
+        adv_uploaded  = st.file_uploader(
+            "上传 SRT 文件（可多选）",
+            type=["srt"],
+            accept_multiple_files=True,
+            key="adv_uploader",
+        )
+        adv_files = [(f.name, f.read()) for f in adv_uploaded] if adv_uploaded else []
+
+        if adv_files:
+            # 重复文件检查
+            adv_out_check = _cfg.get("adv_output_dir", "").strip()
+            if adv_out_check:
+                adv_out_path = Path(adv_out_check)
+                skipped_adv, kept_adv = [], []
+                for fname, fbytes in adv_files:
+                    stem = fname.rsplit(".", 1)[0]
+                    if (adv_out_path / f"{stem}_zh.srt").exists():
+                        skipped_adv.append(fname)
+                    else:
+                        kept_adv.append((fname, fbytes))
+                if skipped_adv:
+                    st.warning(f"已跳过 {len(skipped_adv)} 个已存在译文的文件：" + "、".join(skipped_adv))
+                adv_files = kept_adv
+
+        if adv_files:
+            st.caption(f"共 **{len(adv_files)}** 个文件：" + "、".join(n for n, _ in adv_files))
+
+            # 去重
+            adv_dedup = st.toggle("🔧 合并重复字幕（去重）", value=True, key="adv_dedup")
+            if adv_dedup:
+                from dedup import deduplicate
+                adv_gap_s = _cfg.get("dedup_max_gap_s", 300)
+                adv_max_gap_s = st.slider("最大合并间隔（秒）", 0, 600, adv_gap_s, 10, key="adv_gap")
+                if adv_max_gap_s != adv_gap_s:
+                    _cfg["dedup_max_gap_s"] = adv_max_gap_s
+                    cfg_store.save(_cfg)
+
+                deduped_adv, adv_dedup_rows, adv_total_removed = [], [], 0
+                for fname, fbytes in adv_files:
+                    blocks = load_srt_file(fbytes)
+                    merged, removed = deduplicate(blocks, max_gap_ms=adv_max_gap_s * 1000)
+                    adv_total_removed += removed
+                    deduped_adv.append((fname, save_srt_string(merged)))
+                    adv_dedup_rows.append({"文件名": fname, "原始": len(blocks), "优化后": len(merged), "合并": removed})
+
+                if adv_total_removed > 0:
+                    with st.expander(f"📋 去重：共合并 {adv_total_removed} 条", expanded=True):
+                        st.dataframe(adv_dedup_rows, column_config={
+                            "文件名": st.column_config.TextColumn(),
+                            "原始":   st.column_config.NumberColumn(format="%d 条"),
+                            "优化后": st.column_config.NumberColumn(format="%d 条"),
+                            "合并":   st.column_config.NumberColumn(format="%d 条"),
+                        }, hide_index=True, width="stretch")
+                else:
+                    st.success("✅ 未发现重复字幕")
+                adv_files = deduped_adv
+
+        # 输出路径
+        adv_output_dir = st.text_input(
+            "翻译结果保存路径（可选）",
+            value=_cfg.get("adv_output_dir", ""),
+            placeholder=r"例如 D:\Subtitles\advanced",
+            key="adv_output",
+        )
+        if adv_output_dir and adv_output_dir != _cfg.get("adv_output_dir", ""):
+            _cfg["adv_output_dir"] = adv_output_dir
+            cfg_store.save(_cfg)
+
+        # ── 翻译按钮 ────────────────────────────────────
+        if st.button("🚀 开始高级翻译", disabled=not (ollama_model and adv_files), type="primary", key="adv_start"):
+
+            adv_translator = OllamaTranslator(
+                model=ollama_model,
+                preset=ollama_preset,
+                custom_options=custom_options,
+                custom_batch=custom_batch,
+                source_lang=source_lang_name,
+                target_lang=target_lang_name,
+                tone=selected_tone,
+                custom_prompt_path=custom_prompt_path or None,
+            )
+
+            adv_status     = st.empty()
+            adv_bar_blocks = st.progress(0)
+            adv_bar_files  = st.progress(0)
+            adv_stop_btn   = st.empty()
+            adv_result_box = st.empty()
+
+            # 场景上下文显示区
+            adv_scene_expander  = st.expander("🎬 场景上下文（<scene>）", expanded=True)
+            adv_scene_container = adv_scene_expander.empty()
+            adv_log_expander    = st.expander("🔍 模型原始输出（按批）", expanded=False)
+            adv_log_container   = adv_log_expander.empty()
+
+            adv_total_files      = len(adv_files)
+            adv_total_blocks     = sum(len(load_srt_file(fb)) for _, fb in adv_files)
+            adv_stop_event       = threading.Event()
+            adv_zip_result       = [None]
+            adv_error_box        = [None]
+            adv_progress_state   = {"filename": "", "blocks_done": 0, "blocks_total": 1,
+                                    "files_done": 0, "global_done": 0}
+            adv_log_queue        = []
+            adv_log_entries      = []
+            adv_log_counter      = [0]
+            adv_scene_queue      = []
+
+            def adv_on_progress(filename, done, total):
+                adv_progress_state.update({"filename": filename, "blocks_done": done, "blocks_total": total})
+                if done == total:
+                    adv_progress_state["files_done"]  += 1
+                    adv_progress_state["global_done"] += total
+
+            def adv_on_log(raw):
+                adv_log_counter[0] += 1
+                adv_log_queue.append((adv_log_counter[0], raw))
+
+            def adv_on_scene(scene_text):
+                adv_scene_queue.append(scene_text)
+
+            def adv_run():
+                try:
+                    adv_zip_result[0] = process_files(
+                        adv_files, adv_translator,
+                        progress_callback=adv_on_progress,
+                        stop_event=adv_stop_event,
+                        output_dir=Path(adv_output_dir.strip()) if adv_output_dir.strip() else None,
+                        log_callback=adv_on_log,
+                        blacklist=blacklist if blacklist else None,
+                        scene_callback=adv_on_scene,
+                    )
+                except Exception as e:
+                    adv_error_box[0] = e
+
+            adv_status.info("高级翻译进行中，请稍候…")
+            adv_eta_box   = st.empty()
+            adv_thread = threading.Thread(target=adv_run, daemon=True)
+            adv_thread.start()
+            st.session_state.translating = True
+
+            adv_eta_state = {"batch_times": [], "last_global_done": 0}
+            adv_start     = time.time()
+
+            adv_btn_counter = [0]
+            while adv_thread.is_alive():
+                s           = adv_progress_state
+                global_done = s["global_done"] + s["blocks_done"]
+                adv_bar_blocks.progress(
+                    min(global_done / adv_total_blocks, 1.0) if adv_total_blocks else 0,
+                    text=f"字幕进度：{global_done:,} / {adv_total_blocks:,} 条" +
+                         (f"（{s['filename']}）" if s["filename"] else ""),
+                )
+                adv_bar_files.progress(
+                    min(s["files_done"] / adv_total_files, 1.0) if adv_total_files else 0,
+                    text=f"文件进度：{s['files_done']} / {adv_total_files} 个文件",
+                )
+
+                # ETA
+                now = time.time()
+                if global_done > adv_eta_state["last_global_done"] and global_done > 0:
+                    adv_eta_state["batch_times"].append((now, global_done))
+                    adv_eta_state["last_global_done"] = global_done
+                    recent = adv_eta_state["batch_times"][-10:]
+                    if len(recent) >= 2:
+                        t0, d0 = recent[0]
+                        t1, d1 = recent[-1]
+                        elapsed_r = t1 - t0
+                        done_r    = d1 - d0
+                        if elapsed_r > 0 and done_r > 0:
+                            speed     = done_r / elapsed_r
+                            eta_secs  = (adv_total_blocks - global_done) / speed
+                            finish_at = datetime.datetime.now() + datetime.timedelta(seconds=eta_secs)
+                            adv_eta_box.info(
+                                f"⏱ 已用时 **{_fmt_duration(now - adv_start)}**　｜　"
+                                f"剩余约 **{_fmt_duration(eta_secs)}**　｜　"
+                                f"预计完成 **{finish_at.strftime('%H:%M:%S')}**"
+                            )
+
+                adv_btn_counter[0] += 1
+                if adv_stop_btn.button("⏹️ 中断翻译", key=f"adv_stop_{adv_btn_counter[0]}"):
+                    adv_stop_event.set()
+                    adv_status.warning("正在中断…")
+                # 场景上下文更新
+                if adv_scene_queue:
+                    latest_scene = adv_scene_queue[-1]
+                    adv_scene_queue.clear()
+                    adv_scene_container.markdown(latest_scene)
+                # 日志更新
+                if adv_log_queue:
+                    adv_log_entries.extend(adv_log_queue)
+                    adv_log_queue.clear()
+                    n, text = adv_log_entries[-1]
+                    adv_log_container.code(f"─── 批次 {n} ───\n{text}", language=None)
+                time.sleep(0.5)
+
+            adv_bar_blocks.progress(1.0, text=f"字幕进度：{adv_total_blocks:,} / {adv_total_blocks:,} 条")
+            adv_bar_files.progress(1.0, text=f"文件进度：{adv_total_files} / {adv_total_files} 个文件")
+            adv_stop_btn.empty()
+            adv_eta_box.empty()
+            st.session_state.translating = False
+
+            if adv_error_box[0]:
+                adv_status.error(f"❌ 翻译出错：{adv_error_box[0]}")
+                st.exception(adv_error_box[0])
+            elif adv_stop_event.is_set():
+                adv_status.warning(f"⚠️ 已中断，完成 {adv_progress_state['files_done']}/{adv_total_files} 个文件")
+            else:
+                msg = f"✅ 全部 {adv_total_files} 个文件翻译完成"
+                if adv_output_dir.strip():
+                    msg += f"，已保存至 {adv_output_dir.strip()}"
+                adv_status.success(msg)
+
+            if adv_zip_result[0]:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for out_name, out_bytes in adv_zip_result[0]:
+                        zf.writestr(out_name, out_bytes)
+                zip_buf.seek(0)
+                label = "📦 下载已翻译部分" if adv_stop_event.is_set() else "📦 下载 ZIP 压缩包"
+                fname = "advanced_partial.zip" if adv_stop_event.is_set() else "advanced_translated.zip"
+                adv_result_box.download_button(label=label, data=zip_buf.read(),
+                                               file_name=fname, mime="application/zip",
+                                               type="secondary" if adv_stop_event.is_set() else "primary")
 
 
 # ════════════════════════════════════════════════════════

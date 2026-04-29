@@ -1,57 +1,57 @@
-# SRTGPT — 字幕翻译工具 / Subtitle Translation Tool
+# SRTGPT — Subtitle Translation Tool / 字幕翻译工具
 
-批量翻译 SRT 字幕文件，支持多语言，提供 DeepL API 和本地 Ollama 两种翻译引擎。
+Batch translate SRT subtitle files across multiple languages. Supports DeepL API and local Ollama with advanced prompt-based translation modes.
 
-Batch translate SRT subtitle files across multiple languages using DeepL API or local Ollama.
-
----
-
-## 环境要求 / Requirements
-
-- Python 3.10+，Windows 10/11
-- NVIDIA GPU（使用 Ollama 时推荐 / recommended for Ollama）
+批量翻译 SRT 字幕文件，支持多语言、DeepL API 和本地 Ollama，含高级 Prompt 翻译模式。
 
 ---
 
-## 安装 / Installation
+## Requirements / 环境要求
+
+- Python 3.10+, Windows 10/11
+- NVIDIA GPU recommended for Ollama / 使用 Ollama 时推荐 NVIDIA 显卡
+
+---
+
+## Installation / 安装
 
     python -m venv SRTGPT
     SRTGPT\Scripts\activate
     pip install -r requirements.txt
 
-Ollama 本地翻译需额外安装：前往 https://ollama.com/download 下载，安装后在系统命令行执行：
-
-For local Ollama translation, download from https://ollama.com/download, then run:
+For local Ollama translation, download from https://ollama.com/download, then:
 
     ollama pull qwen2.5:14b
 
 ---
 
-## 启动 / Launch
+## Launch / 启动
 
-双击 `启动.bat`，浏览器访问 http://localhost:8502
+Double-click `启动.bat`, then open http://localhost:8502
 
-Double-click `启动.bat`, then open http://localhost:8502 in your browser.
-
-Or manually:
+Or manually / 或手动启动:
 
     SRTGPT\Scripts\activate
     streamlit run src\app.py --server.port 8502
 
 ---
 
-## 文件结构 / File Structure
+## File Structure / 文件结构
 
     project root/
     ├── src/
-    │   ├── app.py                # Streamlit UI
-    │   ├── srt_parser.py         # SRT parsing and writing (pysrt)
-    │   ├── translator.py         # Translation backends (DeepL / Ollama)
+    │   ├── app.py                # Streamlit UI (3 tabs)
+    │   ├── translator.py         # DeepL and Ollama backends
+    │   ├── prompt_manager.py     # Prompt loading, parsing, tag extraction
     │   ├── batch_processor.py    # Batch file processing
+    │   ├── srt_parser.py         # SRT parsing and writing (pysrt)
     │   ├── dedup.py              # Subtitle deduplication
-    │   ├── blacklist.py          # Blacklist filtering
+    │   ├── blacklist.py          # Wildcard blacklist filtering
     │   ├── languages.py          # Language data and quality tiers
-    │   └── config.py             # Local config read/write
+    │   ├── config.py             # Local config read/write
+    │   └── prompts/
+    │       ├── standard.txt      # Standard subtitle translation prompt
+    │       └── pornify.txt       # Adult content translation prompt
     ├── SRTGPT/                   # Virtual environment (not tracked)
     ├── config.json               # Auto-generated local config (not tracked)
     ├── requirements.txt
@@ -63,123 +63,147 @@ Or manually:
 
 ---
 
-## 功能说明 / Features
+## Features / 功能
 
-### 翻译 / Translation（Tab 1）
+### Tab 1 — Translation / 翻译
 
-**上传 SRT 文件 / Upload SRT files**
+Standard subtitle translation workflow.
 
-支持多文件同时上传。如已设置输出路径，上传时自动跳过已存在译文的文件。
+标准字幕翻译流程。
 
-Multiple files supported. If an output path is set, files with existing translations are skipped automatically.
+**Upload / 上传**
+Multiple SRT files supported. If an output path is set, files with existing translations are automatically skipped.
+支持多文件上传，已设置输出路径时自动跳过已存在译文的文件。
 
-**字幕去重 / Deduplication（默认开启 / on by default）**
+**Deduplication / 去重（default on / 默认开启）**
+Merges adjacent identical entries. Max gap configurable (default 5 min).
+合并相邻重复条目，最大间隔可调（默认 5 分钟）。
 
-合并相邻内容相同的字幕条目，可调整最大合并间隔（默认 5 分钟）。
+**Usage / time estimate / 用量预估**
+DeepL: shows account quota and expected character consumption.
+Ollama: runs a benchmark to estimate total translation time.
+DeepL 显示账户配额；Ollama 实测基准并预估总用时。
 
-Merges adjacent identical subtitle entries. Max gap is configurable (default 5 minutes).
+**Output path / 输出路径**
+Each file saved immediately upon completion. Path persisted in config.json.
+每个文件完成后立即保存，路径记忆在 config.json。
 
-**用量 / 用时预估 / Usage & time estimation**
+**Progress / 进度**
+Two progress bars (subtitle count + file count). Real-time ETA: elapsed time, remaining time, and estimated finish time, updated after each batch.
+两条进度条（字幕条数 + 文件数）。实时 ETA：已用时、剩余时间、预计完成时刻，每批更新。
 
-DeepL 模式显示账户配额余量；Ollama 模式可测速并预估总用时。
-
-DeepL mode shows account quota; Ollama mode runs a benchmark to estimate total translation time.
-
-**翻译输出路径 / Output path**
-
-每完成一个文件立即保存到指定路径，路径记忆在 config.json。
-
-Each file is saved immediately upon completion. Path is persisted in config.json.
-
-**进度与下载 / Progress & download**
-
-两条进度条分别显示字幕条数和文件数进度。Ollama 模式支持查看模型原始输出和中途中断，完成后提供 ZIP 下载。
-
-Two progress bars show subtitle count and file count. Ollama mode supports raw output inspection and mid-run interruption. ZIP download available on completion.
-
-### 黑名单批处理 / Blacklist Batch Processing（Tab 3）
-
-上传已翻译的中文 SRT 文件，根据侧边栏通配符规则过滤匹配条目，自动重排序号，保存到指定路径或下载 ZIP。
-
-Upload translated SRT files, filter entries matching sidebar wildcard rules, re-index automatically, then save to a path or download as ZIP.
+Ollama mode: raw model output viewer (latest batch), mid-run interruption with partial download.
+Ollama 模式：可查看模型原始输出，支持中断并下载已完成部分。
 
 ---
 
-## 侧边栏设置 / Sidebar Settings
+### Tab 2 — Advanced Mode / 高级模式
 
-### 翻译引擎 / Translation Engine
+Ollama-only. Uses external prompt files with tone selection and cross-batch scene context.
+仅限 Ollama。使用外置 Prompt 文件，支持风格选择和跨批次场景上下文。
 
-**DeepL API** — 填入 API Key（Free 版末尾为 `:fx`），Key 保存在 config.json。每批 50 条并行发送，Free 版每月 50 万字符免费。注意：Free 版内容可能被 DeepL 用于模型训练，敏感内容请使用 Pro 版。
+**Tone selection / 风格选择**
+- `standard` — Professional subtitle translation / 专业字幕翻译
+- `pornify` — Adult content translation with explicit language / 成人内容翻译
+- Custom `.txt` files in `src/prompts/` are auto-detected / 自定义 .txt 文件自动检测
 
-Enter your API Key (Free tier keys end in `:fx`). Key is saved in config.json. Free tier: 500,000 characters/month. Note: Free tier content may be used by DeepL for model training; use Pro for sensitive content.
+**Prompt format / Prompt 格式**
+Files use a three-section structure:
+文件采用三段结构：
 
-**本地 Ollama / Local Ollama** — 无需 Key，数据完全本地。推荐模型 `qwen2.5:14b`，12GB 显存可流畅运行。
+    ### prompt           — User message header
+    ### instructions     — System prompt (supports {source_lang} / {target_lang})
+    ### retry_instructions — Retry prompt on format failure
 
-No API key required, fully local. Recommended model: `qwen2.5:14b`, runs well with 12GB VRAM.
+**Scene context / 场景上下文**
+Each batch extracts a `<scene>` tag from the model output and passes it to the next batch as context, replacing the sliding window approach. Displayed live in the UI.
+每批从模型输出提取 `<scene>` 标签传给下一批作为上下文，替代滑动窗口。实时显示在界面。
 
-推理模式 / Inference presets:
+All Tab 1 preprocessing (dedup, blacklist, duplicate file check, output path, ETA) is included.
+包含全部 Tab 1 预处理功能（去重、黑名单、重复检查、输出路径、ETA）。
 
-- 均衡 / Balanced：ctx 512，批次 8 / batch 8
-- 高吞吐 / Throughput：ctx 2048，批次 20 / batch 20
-- 自定义 / Custom：手动设置所有参数 / manual parameter control
+---
 
-建议在系统环境变量中添加 `OLLAMA_KEEP_ALIVE = -1`，让模型常驻显存。
+### Tab 3 — Blacklist Batch Processing / 黑名单批处理
+
+Upload translated `_zh.srt` files. Entries matching sidebar blacklist rules are removed and subtitles re-indexed. Save to a path or download as ZIP.
+上传已翻译的 `_zh.srt` 文件，过滤黑名单匹配条目并重排序号，保存到指定路径或下载 ZIP。
+
+---
+
+## Sidebar Settings / 侧边栏设置
+
+### Translation Engine / 翻译引擎
+
+**DeepL API** — Enter API Key (Free tier keys end in `:fx`). Key saved in config.json. 500,000 characters/month free. Note: Free tier content may be used by DeepL for model training.
+填入 API Key（Free 版末尾为 `:fx`），Key 保存在 config.json，每月 50 万字符免费。Free 版内容可能被 DeepL 用于训练。
+
+**Local Ollama** — No API key, fully local. Recommended: `qwen2.5:14b` (12GB VRAM).
+无需 Key，完全本地。推荐 `qwen2.5:14b`（12GB 显存）。
+
+Inference presets / 推理模式:
+- Balanced: ctx 2048, batch 10
+- Throughput: ctx 4096, batch 20
+- Custom: manual parameter control with automatic batch size clamping to prevent context overflow
+
+Batch size is automatically capped based on `num_ctx` to prevent context overflow.
+批次大小根据 `num_ctx` 自动上限，防止上下文溢出。
 
 Add `OLLAMA_KEEP_ALIVE = -1` to system environment variables to keep the model loaded in VRAM.
+在系统环境变量中添加 `OLLAMA_KEEP_ALIVE = -1`，让模型常驻显存。
 
-### 语言选择 / Language Selection
+### Language Selection / 语言选择
 
-DeepL 支持 35 种源语言和 36 种目标语言；Ollama 支持 20 种常用语言。选择质量较低的语言对时界面自动显示提示。
+DeepL: 35 source / 36 target languages. Ollama: 20 common languages.
+A warning is shown for language pairs with limited quality.
+DeepL 支持 35 种源语言和 36 种目标语言；Ollama 支持 20 种常用语言。质量较低的语言对会显示警告。
 
-DeepL supports 35 source and 36 target languages; Ollama covers 20 common languages. A warning is shown when the selected language pair has limited quality.
+### Blacklist / 黑名单
 
-### 字幕黑名单 / Subtitle Blacklist
+Wildcard rules, one per line, saved in config.json. Applied after translation (Tab 1 & 2) and as standalone batch processing (Tab 3).
+通配符规则，每行一条，保存在 config.json。翻译后自动过滤（Tab 1 & 2），也可单独批量处理（Tab 3）。
 
-通配符规则，每行一条，保存在 config.json。翻译完成后自动过滤匹配条目并重排序号。
-
-Wildcard rules, one per line, saved in config.json. Matching entries are removed and subtitles re-indexed after translation.
-
-通配符 / Wildcards:
-
-- `*` 匹配任意内容 / matches anything
-- `?` 匹配单个字符 / matches one character
-- 不区分大小写 / case-insensitive
-
-示例 / Examples：`*广告*`、`请订阅*`、`Translated by ?*`
+Wildcards / 通配符: `*` = anything, `?` = one character, case-insensitive.
+示例: `*广告*`, `请订阅*`, `Translated by ?*`
 
 ---
 
-## 本地配置 / Local Config（config.json）
+## Local Config / 本地配置（config.json）
 
-自动生成于根目录，已加入 `.gitignore`。/ Auto-generated at project root, excluded from version control.
+Auto-generated at project root, excluded from version control.
+自动生成于根目录，已加入 `.gitignore`。
 
-| 键 / Key | 说明 / Description |
+| Key / 键 | Description / 说明 |
 |----------|-------------------|
 | `deepl_api_key` | DeepL API Key |
-| `source_lang` | 上次源语言 / Last source language |
-| `target_lang` | 上次目标语言 / Last target language |
-| `translate_output_dir` | 翻译输出路径 / Translation output path |
-| `bl3_output_dir` | 黑名单处理输出路径 / Blacklist output path |
-| `dedup_max_gap_s` | 去重最大间隔（秒）/ Dedup max gap (seconds) |
-| `blacklist` | 黑名单规则列表 / Blacklist pattern list |
+| `source_lang` | Last source language / 上次源语言 |
+| `target_lang` | Last target language / 上次目标语言 |
+| `translate_output_dir` | Tab 1 output path / 翻译输出路径 |
+| `adv_output_dir` | Tab 2 output path / 高级模式输出路径 |
+| `bl3_output_dir` | Tab 3 output path / 黑名单处理输出路径 |
+| `dedup_max_gap_s` | Dedup max gap in seconds / 去重最大间隔（秒）|
+| `blacklist` | Blacklist pattern list / 黑名单规则列表 |
+| `adv_tone` | Last selected tone / 上次选择的翻译风格 |
+| `custom_prompt_path` | Custom prompt file path / 自定义 Prompt 文件路径 |
 
 ---
 
-## 翻译质量对比 / Quality Comparison
+## Translation Quality / 翻译质量对比
 
 |  | DeepL | Ollama qwen2.5:14b |
 |--|-------|--------------------|
-| 日/韩/中 → 中文 / JA/KO/ZH → ZH | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| 欧洲语言 → 中文 / EU → ZH | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 阿拉伯/俄语 → 中文 / AR/RU → ZH | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 速度 / Speed | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
-| 费用 / Cost | 50万字符/月免费 / 500K chars/month free | 完全免费 / Free |
-| 隐私 / Privacy | 上传至服务器 / Uploads to server | 完全本地 / Fully local |
+| JA/KO/ZH → ZH 日韩中→中文 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| EU langs → ZH 欧洲语言→中文 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| AR/RU → ZH 阿拉伯/俄→中文 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| Speed / 速度 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
+| Cost / 费用 | 500K chars/month free | Free / 完全免费 |
+| Privacy / 隐私 | Uploads to server / 上传服务器 | Fully local / 完全本地 |
 
 ---
 
-## 版权 / License
+## License / 版权
 
-源代码以 MIT License 发布，详见 LICENSE。/ Source code released under MIT License, see LICENSE.
+Source code released under MIT License — see LICENSE.
+Third-party licenses and DeepL usage restrictions — see NOTICE.md.
 
-第三方组件许可及 DeepL 使用限制详见 NOTICE.md。/ Third-party licenses and DeepL usage restrictions in NOTICE.md.
+源代码以 MIT License 发布，详见 LICENSE。第三方许可及 DeepL 使用限制详见 NOTICE.md。
